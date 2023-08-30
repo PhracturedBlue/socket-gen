@@ -1,3 +1,6 @@
+{{- $env := .Env }}
+{{- $listen_address := index .ListenAddrs 0 }}
+
 # If we receive X-Forwarded-Proto, pass it through; otherwise, pass along the
 # scheme used to connect to this server
 map $http_x_forwarded_proto $proxy_x_forwarded_proto {
@@ -60,26 +63,46 @@ proxy_set_header X-Original-URI $request_uri;
 # Mitigate httpoxy attack (see README for details)
 proxy_set_header Proxy "";
 
-{{range $key, $obj := .}}
+{{range $key, $obj := .Hosts}}
+{{- if or (ne $obj.SocketPath "") (ne $obj.Name "") }}
 # {{ $key }}/
 upstream {{ $key }} {
+    {{- if ne $obj.SocketPath "" }}
     server unix:{{ $obj.SocketPath }};
+    {{- else }}
+    server {{ $obj.Name }}
+    {{- end }}
 }
 
 server {
     server_name {{ $key }};
     http2 on;
     # access_log /var/log/nginx/access.log vhost;
-    listen 11080 ;
+    listen {{ $listen_address }} ;
+    {{- if or (ne (index $env "allow_unlimited_body") "") (ne (index $obj.Config "allow_unlimited_body") "") }}
     client_max_body_size 0;
+    {{- end }}
+    {{- if ne (index $env "server") "" }}
+    {{ $env.server }}
+    {{- end }}
+    {{- if ne (index $obj.Config "server") "" }}
+    {{ $obj.Config.server }}
+    {{- end }}
     location / {
+        {{- if ne (index $env "location") "" }}
+        {{ $env.location }}
+        {{- end }}
+        {{- if ne (index $obj.Config "location") "" }}
+        {{ $obj.Config.location }}
+        {{- end }}
         proxy_pass http://{{ $key }};
         set $upstream_keepalive false;
     }
 }
-{{ end }}
+{{- end }}
+{{- end }}
 
 server {
-    listen 11080 default_server;
+    listen {{ $listen_address }} default_server;
     return 404;
 }

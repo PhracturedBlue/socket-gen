@@ -47,7 +47,7 @@ type Host struct {
 	SocketPath  string
 	Name        string
 	Overrides   []string
-	Config      Manual
+	Config      map[string]string
 }
 
 type Template struct {
@@ -62,12 +62,12 @@ type Manual struct {
 }
 
 var (
-	rootDir      string = "."
 	templateFile string
 	outputFile   string
 	overrideDir  string
 	command	     string
 	delay        int = 5
+	monitorPaths = []string{"."}
 	templateVars Template
 )
 func init() {
@@ -75,7 +75,6 @@ func init() {
 	flag.CommandLine.Usage = func() {
 		fmt.Fprintln(os.Stderr, usage)
 	}
-	flag.StringVar(&rootDir, "root-dir", "", "root directory to monitor")
 	flag.StringVar(&templateFile, "template", "", "template file")
 	flag.StringVar(&outputFile, "output", "", "output file")
 	flag.StringVar(&overrideDir, "override-dir", "", "directory to place override files in")
@@ -84,7 +83,7 @@ func init() {
 
 	flag.Parse()
 	if flag.NArg() != 0 {
-		log.Fatalf("Found unexpected arguments: %s", flag.Args())
+		monitorPaths = flag.Args()
 	}
 }
 
@@ -176,10 +175,14 @@ func Scan() {
 	log.Println("Scanning...")
 	defer log.Println("Scanning complete")
 	hosts := make(map[string]*Host)
-	paths, err := filepath.Glob(rootDir + "/*/*")
-	if err != nil {
-		log.Printf("Could not scan %v: %v\n", rootDir, err)
-		return
+	paths := []string{}
+	for _, monitorpath := range monitorPaths {
+		globpaths, err := filepath.Glob(monitorpath + "/*/*")
+		if err != nil {
+			log.Printf("Could not scan %v: %v\n", monitorpath, err)
+			continue
+		}
+		paths = append(paths, globpaths...)
 	}
 	for _, filename := range paths {
 		s, err := os.Stat(filename)
@@ -191,10 +194,10 @@ func Scan() {
 		host, e := hosts[hostname]
 		log.Printf("host: %v e: %v", host, e)
 		if e == false {
-			host = &Host{"", "", []string{}, Manual{"", hostname}}
+			host = &Host{"", "", []string{}, make(map[string]string)}
 			hosts[hostname] = host
 		}
-		log.Printf("Found: %v %v %v", filename, path.Base(filename), path.Ext(filename))
+		// log.Printf("Found: %v %v %v", filename, path.Base(filename), path.Ext(filename))
 		if s.Mode().Type() == fs.ModeSocket {
 			host.SocketPath = filename
 		} else if path.Base(filename) == "override" + path.Ext(filename) {
@@ -219,15 +222,16 @@ func Scan() {
 				log.Printf("Failed to read %v: %v\n", filename, err)
 				continue
 			}
-			var m Manual
+			var m map[string]string
 			err = yaml.Unmarshal(data, &m)
 			if err != nil {
 				log.Printf("Failed to parse %v: %v", filename, err)
 				continue
 			}
+			log.Printf("%v", m)
 			host.Config = m
-			if m.Name != "" {
-				host.Name = m.Name
+			if val, ok := m["name"]; ok {
+				host.Name = val
 			}
 		}
 
@@ -249,10 +253,10 @@ func Scan() {
 			}
 		}
 		obj.Overrides = newOverrides
-		if obj.Config.Host == "" {
-			obj.Config.Host = vhost
+		if _, ok := obj.Config["host"]; ! ok {
+			obj.Config["host"] = vhost
 		}
-		modhosts[obj.Config.Host] = obj
+		modhosts[obj.Config["host"]] = obj
 	}
 	p, err := ioutil.ReadFile(templateFile)
 	if err != nil {
@@ -345,7 +349,7 @@ func GetListenAddress() []string {
 }
 
 func GetEnvVars() map[string]string {
-	envpfx := "SOCKGEN_"
+	envpfx := "SOCKETGEN_"
 	env := make(map[string]string)
 	for _, item := range os.Environ() {
 		parsed := strings.SplitN(item, "=", 2)
@@ -373,13 +377,15 @@ func main() {
 		log.Fatalf("Could not read template file %v: %v", templateFile, err)
 	}
 	// Setup notify
-	path := rootDir + string(os.PathSeparator) + "..."
 	c := make(chan notify.EventInfo, 1)
-	if err := notify.Watch(path, c, notify.All); err != nil {
-		log.Fatalf("Failed to create inotify watcher: %v", err)
+	for _, path := range monitorPaths {
+		path = path + string(os.PathSeparator) + "..."
+		if err := notify.Watch(path, c, notify.All); err != nil {
+			log.Fatalf("Failed to create inotify watcher fro %v: %v", path, err)
+		}
 	}
 	if err := notify.Watch(templateFile, c, notify.All); err != nil {
-		log.Fatalf("Failed to create inotify watcher: %v", err)
+		log.Fatalf("Failed to create inotify watcher for %v: %v", templateFile, err)
 	}
 
 	Scan()
