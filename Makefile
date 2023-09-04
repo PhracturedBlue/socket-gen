@@ -1,14 +1,15 @@
 .SILENT :
-.PHONY : docker-gen clean fmt
+.PHONY : socket-gen clean fmt
 
-TAG:=`git describe --tags`
-LDFLAGS:=-X main.buildVersion=$(TAG)
+# TAG:=`git describe --tags`
+# LDFLAGS:=-X main.buildVersion=$(TAG)
 
-all: docker-gen
+all: socket-gen
 
 socket-gen:
 	echo "Building socket-gen"
-	go build -ldflags "$(LDFLAGS)" ./cmd/socket-gen
+	#go build -ldflags "$(LDFLAGS)" ./cmd/socket-gen
+	go build ./cmd/socket-gen
 
 check-gofmt:
 	if [ -n "$(shell go fmt ./cmd/...)" ]; then \

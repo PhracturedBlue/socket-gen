@@ -1,5 +1,11 @@
 {{- $env := .Env }}
-{{- $listen_address := index .ListenAddrs 0 }}
+{{- $func := .Func }}
+{{- $http_listen_address := index .ListenAddrs 0 }}
+{{- $https_listen_address := .Func.IndexIfExists .ListenAddrs 1 "" }}
+{{- $cert_dir := $func.MapIndex $env "cert_dir" "/etc/nginx/certs/" }}
+
+ssl_session_cache   shared:SSL:10m;
+ssl_session_timeout 10m;
 
 # If we receive X-Forwarded-Proto, pass it through; otherwise, pass along the
 # scheme used to connect to this server
@@ -65,6 +71,7 @@ proxy_set_header Proxy "";
 
 {{range $key, $obj := .Hosts}}
 {{- if or (ne $obj.SocketPath "") (ne $obj.Name "") }}
+{{- $cert_dir := $func.MapIndex $obj.Config "cert_dir" $cert_dir }}
 # {{ $key }}/
 upstream {{ $key }} {
     {{- if ne $obj.SocketPath "" }}
@@ -78,7 +85,16 @@ server {
     server_name {{ $key }};
     http2 on;
     # access_log /var/log/nginx/access.log vhost;
-    listen {{ $listen_address }} ;
+    listen {{ $http_listen_address }} ;
+    {{- if and (ne $https_listen_address "") ($func.FileExists (print $cert_dir "/" $key ".crt")) }}
+    listen {{ $https_listen_address }} ssl ;
+    keepalive_timeout   70;
+    ssl_certificate     {{ (print $cert_dir "/" $key ".crt") }} ;
+    ssl_certificate_key {{  (print $cert_dir "/" $key ".key") }} ;
+    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    {{ end }}
+
     {{- if or (ne (index $env "allow_unlimited_body") "") (ne (index $obj.Config "allow_unlimited_body") "") }}
     client_max_body_size 0;
     {{- end }}
@@ -99,10 +115,19 @@ server {
         set $upstream_keepalive false;
     }
 }
+
+
 {{- end }}
 {{- end }}
 
 server {
-    listen {{ $listen_address }} default_server;
+    listen {{ $http_listen_address }} default_server;
+    {{- if and (ne $https_listen_address "") ($func.FileExists (print $cert_dir "/default.crt")) }}
+    listen {{ $https_listen_address }} ssl default_server;
+    ssl_certificate     {{ (print $cert_dir "/default.crt") }} ;
+    ssl_certificate_key {{  (print $cert_dir "/default.key") }} ;
+    ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    {{- end }}
     return 404;
 }

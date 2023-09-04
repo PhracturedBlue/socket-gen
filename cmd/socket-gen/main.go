@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"flag"
-	"fmt"
 	"io"
 	"io/fs"
 	"io/ioutil"
@@ -50,10 +49,13 @@ type Host struct {
 	Config      map[string]string
 }
 
+type Func struct {}
+
 type Template struct {
 	ListenAddrs []string
 	Env         map[string]string
 	Hosts       map[string]*Host
+	Func        Func
 }
 
 type Manual struct {
@@ -66,20 +68,22 @@ var (
 	outputFile   string
 	overrideDir  string
 	command	     string
+	runOnce      bool
 	delay        int = 5
 	monitorPaths = []string{"."}
 	templateVars Template
 )
 func init() {
-	usage := "..."
-	flag.CommandLine.Usage = func() {
-		fmt.Fprintln(os.Stderr, usage)
-	}
+	//usage := "..."
+	//flag.CommandLine.Usage = func() {
+	//	fmt.Fprintln(os.Stderr, usage)
+	//}
 	flag.StringVar(&templateFile, "template", "", "template file")
 	flag.StringVar(&outputFile, "output", "", "output file")
 	flag.StringVar(&overrideDir, "override-dir", "", "directory to place override files in")
 	flag.StringVar(&command, "command", "", "command to execute on change")
 	flag.IntVar(&delay, "delay", 5, "wait # seconds before updating template and trigger")
+	flag.BoolVar(&runOnce, "once", false, "run template once and exit")
 
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -171,6 +175,28 @@ func SplitCommand(command string) (string, []string) {
 	return cmd, args
 }
 
+func (f Func) MapIndex(item map[string]string, idx string, defval string) string {
+	if res, ok := item[idx]; ok {
+		return res
+	}
+	return defval
+}
+
+func (f Func) IndexIfExists(items []string, idx int, defval string) string {
+	if len(items) < idx {
+		return defval
+	}
+	return items[idx]
+}
+
+func (f Func) FileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
 func Scan() {
 	log.Println("Scanning...")
 	defer log.Println("Scanning complete")
@@ -192,7 +218,6 @@ func Scan() {
 		}
 		hostname := path.Base(path.Dir(filename))
 		host, e := hosts[hostname]
-		log.Printf("host: %v e: %v", host, e)
 		if e == false {
 			host = &Host{"", "", []string{}, make(map[string]string)}
 			hosts[hostname] = host
@@ -228,7 +253,6 @@ func Scan() {
 				log.Printf("Failed to parse %v: %v", filename, err)
 				continue
 			}
-			log.Printf("%v", m)
 			host.Config = m
 			if val, ok := m["name"]; ok {
 				host.Name = val
@@ -364,8 +388,7 @@ func GetEnvVars() map[string]string {
 }
 
 func main() {
-	templateVars = Template{GetListenAddress(), GetEnvVars(), map[string]*Host{}}
-	log.Printf("%v", templateVars)
+	templateVars = Template{GetListenAddress(), GetEnvVars(), map[string]*Host{}, Func{}}
 	if templateFile == "" {
 		log.Fatal("-template is a required parameter")
 	}
@@ -376,6 +399,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Could not read template file %v: %v", templateFile, err)
 	}
+	if runOnce {
+		Scan()
+		return
+	}
+
 	// Setup notify
 	c := make(chan notify.EventInfo, 1)
 	for _, path := range monitorPaths {
