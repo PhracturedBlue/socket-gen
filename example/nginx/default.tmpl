@@ -111,7 +111,13 @@ server {
         {{- if ne (index $obj.Config "location") "" }}
         {{ $obj.Config.location }}
         {{- end }}
+        {{- if eq (index $obj.Config "mode") "grpcs" }}
+        grpc_pass grpcs://{{ $key }};
+        {{- else if eq (index $obj.Config "mode") "grpc" }}
+        grpc_pass grpc://{{ $key }};
+        {{- else }}
         proxy_pass http://{{ $key }};
+        {{- end }}
         set $upstream_keepalive false;
     }
 }

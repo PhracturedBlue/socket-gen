@@ -20,6 +20,7 @@ import (
 
 	"github.com/rjeczalik/notify"
 	"github.com/goccy/go-yaml"
+	"github.com/google/renameio/v2"
 )
 
 /* Steps:
@@ -70,6 +71,7 @@ var (
 	command	     string
 	runOnce      bool
 	delay        int = 5
+	permissions  int = -1
 	monitorPaths = []string{"."}
 	templateVars Template
 )
@@ -84,6 +86,7 @@ func init() {
 	flag.StringVar(&command, "command", "", "command to execute on change")
 	flag.IntVar(&delay, "delay", 5, "wait # seconds before updating template and trigger")
 	flag.BoolVar(&runOnce, "once", false, "run template once and exit")
+	flag.IntVar(&permissions, "permissions", -1, "override socket permissions")
 
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -128,6 +131,14 @@ func CopyFile(srcpath, dstpath string) (err error) {
 
         _, err = io.Copy(w, r)
         return err
+}
+
+func ReplaceFile(src string, data []byte) error {
+	orig, err := ioutil.ReadFile(src)
+	if err == nil && bytes.Equal(orig, data) {
+		return nil
+	}
+        return renameio.WriteFile(src, data, 0o644)
 }
 
 // Split splits command line string into command name and command line arguments,
@@ -225,6 +236,10 @@ func Scan() {
 		// log.Printf("Found: %v %v %v", filename, path.Base(filename), path.Ext(filename))
 		if s.Mode().Type() == fs.ModeSocket {
 			host.SocketPath = filename
+			if permissions != -1 && (s.Mode().Perm() & os.FileMode(permissions)) != os.FileMode(permissions) {
+				os.Chmod(filename, s.Mode().Perm() | os.FileMode(permissions))
+			}
+				
 		} else if path.Base(filename) == "override" + path.Ext(filename) {
 			host.Overrides = append(host.Overrides, filename)
 			log.Printf("overrides: %v", host.Overrides)
@@ -299,17 +314,12 @@ func Scan() {
 		log.Printf("Failed to apply template for %v: %v\n", templateFile, err)
 		return
 	}
-        w, err := os.Create(outputFile)
+
+	ReplaceFile(outputFile,  buf.Bytes())
         if err != nil {
 		log.Printf("Failed to write template to %s: %s\n", outputFile, err)
                 return
         }
-	defer w.Close()
-	_, err = w.Write(buf.Bytes())
-	if err != nil {
-		log.Printf("Failed to write templatized file %v: %v\n", outputFile, err)
-		return
-	}
 	if command != "" {
 		name, args := SplitCommand(command)
 		cmd := exec.Command(name, args...)

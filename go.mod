@@ -4,6 +4,7 @@ go 1.21.0
 
 require (
 	github.com/goccy/go-yaml v1.11.0
+	github.com/google/renameio/v2 v2.0.0
 	github.com/rjeczalik/notify v0.9.3
 )
 
