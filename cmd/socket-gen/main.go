@@ -14,13 +14,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
 
-	"github.com/rjeczalik/notify"
 	"github.com/goccy/go-yaml"
 	"github.com/google/renameio/v2"
+	"github.com/rjeczalik/notify"
 )
 
 /* Steps:
@@ -42,15 +43,14 @@ import (
        run scanner
 */
 
-
 type Host struct {
-	SocketPath  string
-	Name        string
-	Overrides   []string
-	Config      map[string]string
+	SocketPath string
+	Name       string
+	Overrides  []string
+	Config     map[string]string
 }
 
-type Func struct {}
+type Func struct{}
 
 type Template struct {
 	ListenAddrs []string
@@ -60,21 +60,24 @@ type Template struct {
 }
 
 type Manual struct {
-	Name  string `yaml:name`
-	Host  string `yaml:host`
+	Name string `yaml:name`
+	Host string `yaml:host`
 }
 
 var (
 	templateFile string
 	outputFile   string
 	overrideDir  string
-	command	     string
+	command      string
 	runOnce      bool
 	delay        int = 5
 	permissions  int = -1
+	launch       string
 	monitorPaths = []string{"."}
 	templateVars Template
+	seenHosts    = make(map[string]bool)
 )
+
 func init() {
 	//usage := "..."
 	//flag.CommandLine.Usage = func() {
@@ -84,6 +87,7 @@ func init() {
 	flag.StringVar(&outputFile, "output", "", "output file")
 	flag.StringVar(&overrideDir, "override-dir", "", "directory to place override files in")
 	flag.StringVar(&command, "command", "", "command to execute on change")
+	flag.StringVar(&launch, "launch", "", "command to execute on launch")
 	flag.IntVar(&delay, "delay", 5, "wait # seconds before updating template and trigger")
 	flag.BoolVar(&runOnce, "once", false, "run template once and exit")
 	flag.IntVar(&permissions, "permissions", -1, "override socket permissions")
@@ -104,33 +108,33 @@ func CopyFile(srcpath, dstpath string) (err error) {
 		return nil
 	}
 
-        r, err := os.Open(srcpath)
-        if err != nil {
-                return err
-        }
-        defer r.Close() // ignore error: file was opened read-only.
+	r, err := os.Open(srcpath)
+	if err != nil {
+		return err
+	}
+	defer r.Close() // ignore error: file was opened read-only.
 
-        w, err := os.Create(dstpath)
-        if err != nil {
-                return err
-        }
+	w, err := os.Create(dstpath)
+	if err != nil {
+		return err
+	}
 
-        defer func() {
-                // Report the error from Close, if any,
-                // but do so only if there isn't already
-                // an outgoing error.
-                c := w.Close()
+	defer func() {
+		// Report the error from Close, if any,
+		// but do so only if there isn't already
+		// an outgoing error.
+		c := w.Close()
 		if err == nil {
 			if c != nil {
-	                        err = c
+				err = c
 			} else {
 				err = os.Chtimes(dstpath, srcStat.ModTime(), srcStat.ModTime())
 			}
 		}
-        }()
+	}()
 
-        _, err = io.Copy(w, r)
-        return err
+	_, err = io.Copy(w, r)
+	return err
 }
 
 func ReplaceFile(src string, data []byte) error {
@@ -138,7 +142,7 @@ func ReplaceFile(src string, data []byte) error {
 	if err == nil && bytes.Equal(orig, data) {
 		return nil
 	}
-        return renameio.WriteFile(src, data, 0o644)
+	return renameio.WriteFile(src, data, 0o644)
 }
 
 // Split splits command line string into command name and command line arguments,
@@ -236,11 +240,11 @@ func Scan() {
 		// log.Printf("Found: %v %v %v", filename, path.Base(filename), path.Ext(filename))
 		if s.Mode().Type() == fs.ModeSocket {
 			host.SocketPath = filename
-			if permissions != -1 && (s.Mode().Perm() & os.FileMode(permissions)) != os.FileMode(permissions) {
-				os.Chmod(filename, s.Mode().Perm() | os.FileMode(permissions))
+			if permissions != -1 && (s.Mode().Perm()&os.FileMode(permissions)) != os.FileMode(permissions) {
+				os.Chmod(filename, s.Mode().Perm()|os.FileMode(permissions))
 			}
-				
-		} else if path.Base(filename) == "override" + path.Ext(filename) {
+
+		} else if path.Base(filename) == "override"+path.Ext(filename) {
 			host.Overrides = append(host.Overrides, filename)
 			log.Printf("overrides: %v", host.Overrides)
 		} else if path.Base(filename) == "host" {
@@ -276,9 +280,24 @@ func Scan() {
 
 	}
 
+	for vhost, _ := range hosts {
+		_, found := seenHosts[vhost]
+		if ! found {
+			log.Printf("Found new host %s", vhost)
+			seenHosts[vhost] = true
+		}
+	}
+	for vhost, _ := range seenHosts {
+		_, found := hosts[vhost]
+		if ! found {
+			log.Printf("Removing missing host %s", vhost)
+			delete(seenHosts, vhost)
+		}
+	}
+		
 	modhosts := make(map[string]*Host)
 	for vhost, obj := range hosts {
-		newOverrides := []string {}
+		newOverrides := []string{}
 		if overrideDir != "" {
 			log.Printf("Applying overrides for %v: %v\n", vhost, obj.Overrides)
 			for _, override := range obj.Overrides {
@@ -292,7 +311,7 @@ func Scan() {
 			}
 		}
 		obj.Overrides = newOverrides
-		if _, ok := obj.Config["host"]; ! ok {
+		if _, ok := obj.Config["host"]; !ok {
 			obj.Config["host"] = vhost
 		}
 		modhosts[obj.Config["host"]] = obj
@@ -315,11 +334,11 @@ func Scan() {
 		return
 	}
 
-	ReplaceFile(outputFile,  buf.Bytes())
-        if err != nil {
+	ReplaceFile(outputFile, buf.Bytes())
+	if err != nil {
 		log.Printf("Failed to write template to %s: %s\n", outputFile, err)
-                return
-        }
+		return
+	}
 	if command != "" {
 		name, args := SplitCommand(command)
 		cmd := exec.Command(name, args...)
@@ -337,7 +356,7 @@ func ScanMonitor(ch chan bool) {
 		time.Sleep(time.Duration(delay) * time.Second)
 		// Clear channel if there were any signals while sleeping
 		select {
-		case _ = <- ch:
+		case _ = <-ch:
 		default:
 		}
 		Scan()
@@ -349,13 +368,13 @@ func GetListenAddress() []string {
 	if os.Getenv("LISTEN_ADDR") != "" {
 		return strings.Split(os.Getenv("LISTEN_ADDR"), " ")
 	}
-	res := []string {}
+	res := []string{}
 	if os.Getenv("LISTEN_FDS") != "" {
 		cnt, err := strconv.Atoi(os.Getenv("LISTEN_FDS"))
 		if err != nil {
 			log.Fatalf("Could not parse $LISTEN_FDS")
 		}
-		for i := SD_LISTEN_FD_START; i < SD_LISTEN_FD_START + cnt; i++ {
+		for i := SD_LISTEN_FD_START; i < SD_LISTEN_FD_START+cnt; i++ {
 			lsa, err := syscall.Getsockname(i)
 			if err != nil {
 				log.Fatalf("socket-activated file descriptor %d is not a socket: %v", i, err)
@@ -366,11 +385,11 @@ func GetListenAddress() []string {
 			case *syscall.SockaddrInet4:
 				lsa2 := lsa.(*syscall.SockaddrInet4)
 				addr := netip.AddrFrom4(lsa2.Addr)
-				res = append(res, addr.String() + ":" + strconv.Itoa(lsa2.Port))
+				res = append(res, addr.String()+":"+strconv.Itoa(lsa2.Port))
 			case *syscall.SockaddrInet6:
 				lsa2 := lsa.(*syscall.SockaddrInet6)
 				addr := netip.AddrFrom16(lsa2.Addr)
-				res = append(res, addr.String() + ":" + strconv.Itoa(lsa2.Port))
+				res = append(res, addr.String()+":"+strconv.Itoa(lsa2.Port))
 			default:
 				log.Fatalf("socket-activated file descriptor %d is of unexpected type: %+v", lsa)
 			}
@@ -428,14 +447,43 @@ func main() {
 
 	Scan()
 
+	var wg sync.WaitGroup
+
 	// scanch acts like an event
 	scanch := make(chan bool, 1)
-	go ScanMonitor(scanch)
-	for ei := range c {
-		log.Println("received", ei)
-		select {
-		case scanch <- true: // indicate a change
-		default:  // a change is already indicated, no need to duplicate
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ScanMonitor(scanch)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ei := range c {
+			log.Println("received", ei)
+			select {
+			case scanch <- true: // indicate a change
+			default: // a change is already indicated, no need to duplicate
+			}
 		}
+	}()
+	if launch != "" {
+		wg.Add(1)
+		defer wg.Done()
+		log.Printf("Running command: %s\n", launch)
+		parts := strings.Split(launch, " ")
+		cmd := exec.Command(parts[0], parts[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		err := cmd.Run()
+		log.Printf("Command finished with error: %v", err)
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
+
+	wg.Wait()
 }

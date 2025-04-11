@@ -14,7 +14,7 @@ socket-gen:
 check-gofmt:
 	if [ -n "$(shell go fmt ./cmd/...)" ]; then \
 		echo 1>&2 'The following files need to be formatted:'; \
-		gofmt -l ./cmd/docker-gen; \
+		gofmt -l ./cmd/socket-gen; \
 		exit 1; \
 	fi
 
